@@ -18,6 +18,7 @@ def configure_system():
         "sensor_mm": np.array([3.58, 2.685]),
         "focal_mm": 4,
         "resolution": np.array([1280, 960]),
+        "distortion": np.zeros((4, 1)),
 
         # Webcam
         "id_cam1": 4,
@@ -101,6 +102,7 @@ def calibrate(frame, config):
     corners, ids, rejectedPoints = aruco_detector.detectMarkers(frame)
     I_aruco = cv.aruco.drawDetectedMarkers(frame, corners, ids)
 
+    ret = False
     if ids is not None:
         if len(ids) == len(config["coord_world_tags"]):
             print(ids)
@@ -118,18 +120,23 @@ def calibrate(frame, config):
             print(sorted_ids)
 
             if len(sorted_corners) == len(corners):
-                ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(config["coord_world_tags"], sorted_corners, (frame.shape[1],frame.shape[0]), config["m_cam"], None, flags=cv.CALIB_USE_INTRINSIC_GUESS)
-                return ret, mtx, dist, rvecs, tvecs
-    return 0, None, None, None, None
+                sorted_corners = np.array(sorted_corners, dtype=np.float32)
+                coord_world_tags = config["coord_world_tags"].reshape(-1, 3)
+                sorted_corners = sorted_corners.reshape(-1, 2)
+                print(sorted_corners)
+                ret, rvecs, tvecs = cv.solvePnP(coord_world_tags, sorted_corners, config["m_cam"], config["distortion"], flags=0)
+                print(ret, rvecs, tvecs)
+                return ret, rvecs, tvecs
+    return ret, None, None
     
 def get_transformation_matrix(config, rvecs, tvecs):
     """
     Calcule la matrice de transformation pour une caméra.
     """
-    rotation, _ = cv.Rodrigues(rvecs[0])
+    rotation, _ = cv.Rodrigues(rvecs)
     RT = np.zeros((3,4))
     RT[:3, :3] = rotation
-    RT[:3, 3] = tvecs[0].transpose()
+    RT[:3, 3] = tvecs.transpose()
     projection_mtx = np.dot(config["m_cam"], RT)
     return projection_mtx
 
@@ -216,19 +223,19 @@ def ball_detection(frame):
     else:
         return ball_detected, None
 
-def triangulation(right_projection, left_projection, circle1, circle2, right_dist, left_dist):
+def triangulation(right_projection, left_projection, circle1, circle2):
     """
     Triangulation de la position de la balle.
     """
     right_undist = cv.undistortPoints(circle1, 
                     config["m_cam"],
-                    right_dist,
+                    config["distortion"],
                     None,
                     config["m_cam"])
 
     left_undist = cv.undistortPoints(circle2, 
                     config["m_cam"],
-                    left_dist,
+                    config["distortion"],
                     None,
                     config["m_cam"])
 
@@ -255,7 +262,6 @@ def calibrate_cameras(cap1, cap2, cap3, config):
     calibrated1 = False
     calibrated2 = False
     calibrated3 = False
-    r12, t12 = None, None
 
     # Tant que les caméras sont ouvertes et non calibrées
     while (not calibrated1 or not calibrated2 or not calibrated3) and cap1.isOpened() and cap2.isOpened() and cap3.isOpened: 
@@ -266,35 +272,38 @@ def calibrate_cameras(cap1, cap2, cap3, config):
         if ret1 and ret2 and ret3:
             # Test calibration caméra 1
             if not calibrated1:
-                ret11, right_mtx, right_dist, right_rvecs, right_tvecs = calibrate(frame1, config)
-                if ret11!=0:
+                ret11, right_rvecs, right_tvecs = calibrate(frame1, config)
+                print('ret11', ret11)
+                if ret11:
                     calibrated1 = True
-                    display_results(frame1, config["coord_world_tags"], right_rvecs, right_tvecs, config["m_cam"], right_dist)
+                    #display_results(frame1, config["coord_world_tags"], right_rvecs, right_tvecs, config["m_cam"], config["distortion"])
                 cv.imshow('Camera 1', frame1)
 
             # Test calibration caméra 2
             if not calibrated2:
-                ret22, left_mtx, left_dist, left_rvecs, left_tvecs = calibrate(frame2, config)
-                if ret22!=0:
+                ret22, left_rvecs, left_tvecs = calibrate(frame2, config)
+                print('ret22', ret22)
+                if ret22:
                     calibrated2 = True
-                    display_results(frame2, config["coord_world_tags"], left_rvecs, left_tvecs, config["m_cam"], left_dist)
+                    #display_results(frame2, config["coord_world_tags"], left_rvecs, left_tvecs, config["m_cam"], config["distortion"])
                 cv.imshow('Camera 2', frame2)
 
             # Test calibration caméra 3
             if not calibrated3:
-                ret33, mtx, dist, rvecs, tvecs = calibrate(frame3, config)
-                if ret33!=0:
+                ret33, rvecs, tvecs = calibrate(frame3, config)
+                print('ret33', ret33)
+                if ret33:
                     calibrated3 = True
-                    display_results(frame3, config["coord_world_tags"], rvecs, tvecs, config["m_cam"], dist)
+                    #display_results(frame3, config["coord_world_tags"], rvecs, tvecs, config["m_cam"], config["distortion"])
                 cv.imshow('Camera 3', frame3)
 
         # Appuyer sur ECHAP pour arrêter la calibration
         if cv.waitKey(1) == 27:
             break
         
-    return right_rvecs, right_tvecs, right_dist, left_rvecs, left_tvecs, left_dist, rvecs, tvecs
+    return right_rvecs, right_tvecs, left_rvecs, left_tvecs, rvecs, tvecs
 
-def main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, right_dist, left_rvecs, left_tvecs, left_dist, rvecs, tvecs):
+def main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, left_rvecs, left_tvecs, rvecs, tvecs):
     """
     Boucle principale pour capturer les images et envoyer les paramètres via UDP.
     """
@@ -304,8 +313,8 @@ def main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, right_dist, le
 
         if ret1 and ret2:
             # Vecteurs rotation, translation et matrice de rotation de la camera observatrice
-            r12, t12 = get_transformation_matrix2(right_rvecs[0], right_tvecs[0], rvecs[0], tvecs[0])
-            r2, t2 = compute_camera2_from_camera1(right_rvecs[0], right_tvecs[0], r12, t12)
+            r12, t12 = get_transformation_matrix2(right_rvecs, right_tvecs, rvecs, tvecs)
+            r2, t2 = compute_camera2_from_camera1(right_rvecs, right_tvecs, r12, t12)
             rm, _ = cv.Rodrigues(r2)
 
             # Matrices de projection des 2 cameras de calibrage pour la detection de la balle
@@ -318,7 +327,7 @@ def main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, right_dist, le
 
             if ball1_detected and ball2_detected:
                 # Triangulation de la position de la balle
-                euclid_points = triangulation(right_projection, left_projection, circle1, circle2, right_dist, left_dist)
+                euclid_points = triangulation(right_projection, left_projection, circle1, circle2)
                 
                 # Construction du message JSON
                 print(euclid_points.tolist()[0][0])
@@ -353,10 +362,10 @@ if __name__ == "__main__":
     cap1, cap2, cap3 = initialize_cameras(config)
 
     try:
-        right_rvecs, right_tvecs, right_dist, left_rvecs, left_tvecs, left_dist, rvecs, tvecs = calibrate_cameras(cap1, cap2, cap3, config)
+        right_rvecs, right_tvecs, left_rvecs, left_tvecs, rvecs, tvecs = calibrate_cameras(cap1, cap2, cap3, config)
         print('FIN CALIBRAGE')
         cap3.release()
-        main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, right_dist, left_rvecs, left_tvecs, left_dist, rvecs, tvecs)
+        main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, left_rvecs, left_tvecs, rvecs, tvecs)
     finally:
         cap1.release()
         cap2.release()
