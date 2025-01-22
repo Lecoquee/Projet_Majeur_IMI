@@ -117,12 +117,10 @@ def calibrate(frame, config):
                     sorted_corners.append(id_to_corners[predefined_id])
             print(sorted_ids)
 
-            ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(config["coord_world_tags"], sorted_corners, (frame.shape[1],frame.shape[0]), config["m_cam"], None, flags=cv.CALIB_USE_INTRINSIC_GUESS)
-            return ret, mtx, dist, rvecs, tvecs
-        else:
-            return 0, None, None, None, None
-    else:
-        return 0, None, None, None, None
+            if len(sorted_corners) == len(corners):
+                ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(config["coord_world_tags"], sorted_corners, (frame.shape[1],frame.shape[0]), config["m_cam"], None, flags=cv.CALIB_USE_INTRINSIC_GUESS)
+                return ret, mtx, dist, rvecs, tvecs
+    return 0, None, None, None, None
     
 def get_transformation_matrix(config, rvecs, tvecs):
     """
@@ -133,8 +131,6 @@ def get_transformation_matrix(config, rvecs, tvecs):
     RT[:3, :3] = rotation
     RT[:3, 3] = tvecs[0].transpose()
     projection_mtx = np.dot(config["m_cam"], RT)
-    #print(left_projection)
-
     return projection_mtx
 
 def get_transformation_matrix2(r1, t1, r2, t2):
@@ -168,6 +164,9 @@ def display_results(frame, coord_world_tags, r, t, m, d):
             cv.drawMarker(frame, (int(projected_points[j][0][0]), int(projected_points[j][0][1])), color=[0,0,255])
 
 def ball_detection(frame):
+    """
+    Detecte la balle si elle apparait dans le champ de la camera et renvoie son centre.
+    """
     ball_detected = False
     # Convertir l'image en espace de couleur HSV
     hsv = cv.cvtColor(frame, cv.COLOR_BGR2HSV)
@@ -184,6 +183,9 @@ def ball_detection(frame):
 
     # Convertir l'image masquée en niveaux de gris
     gray = cv.cvtColor(yellow_objects, cv.COLOR_BGR2GRAY)
+
+    threshold = 120
+    gray[gray < threshold] = 0
 
     # Appliquer un flou pour aider à la détection des cercles
     gray_blurred = cv.GaussianBlur(gray, (15, 15), 0)
@@ -215,6 +217,9 @@ def ball_detection(frame):
         return ball_detected, None
 
 def triangulation(right_projection, left_projection, circle1, circle2, right_dist, left_dist):
+    """
+    Triangulation de la position de la balle.
+    """
     right_undist = cv.undistortPoints(circle1, 
                     config["m_cam"],
                     right_dist,
@@ -235,11 +240,6 @@ def triangulation(right_projection, left_projection, circle1, circle2, right_dis
     homog_points = triangulation.transpose()
     euclid_points = cv.convertPointsFromHomogeneous(homog_points)
     print('POSITION: ', euclid_points)
-
-    reprojected_point = left_projection @ homog_points.transpose()  # Produit matriciel
-    reprojected_point /= reprojected_point[2]  # Normalisation pour obtenir (x, y)
-
-    print("Point reprojeté : ", reprojected_point[:2])  # Coordonnées (x, y)
 
     return euclid_points
 
@@ -298,52 +298,26 @@ def main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, right_dist, le
     """
     Boucle principale pour capturer les images et envoyer les paramètres via UDP.
     """
-    data_camera_sent = False
     while cap1.isOpened() and cap2.isOpened():
         ret1, frame1 = cap1.read()
         ret2, frame2 = cap2.read()
 
         if ret1 and ret2:
+            # Vecteurs rotation, translation et matrice de rotation de la camera observatrice
             r12, t12 = get_transformation_matrix2(right_rvecs[0], right_tvecs[0], rvecs[0], tvecs[0])
-            print('R12, T12', r12, t12)
             r2, t2 = compute_camera2_from_camera1(right_rvecs[0], right_tvecs[0], r12, t12)
             rm, _ = cv.Rodrigues(r2)
-            print('R2, T2, RM: ', r2, t2.T.tolist(), rm)
 
-            # mat_rot, _ = cv.Rodrigues(right_rvecs[0])  # Convertir le vecteur de rotation en matrice de rotation
-            # pos_cam = -np.dot(mat_rot.T, right_tvecs[0])
-            # print('Coordonnées de la caméra gauche dans le repère monde:\n', pos_cam)
-
-            # mat_rot, _ = cv.Rodrigues(left_rvecs[0])  # Convertir le vecteur de rotation en matrice de rotation
-            # pos_cam = -np.dot(mat_rot.T, left_tvecs[0])
-            # print('Coordonnées de la caméra droite dans le repère monde:\n', pos_cam)
-
-            mat_rot, _ = cv.Rodrigues(rvecs[0])  # Convertir le vecteur de rotation en matrice de rotation
-            pos_cam = -np.dot(mat_rot.T, tvecs[0])
-            print('Coordonnées de la caméra dans le repère monde:\n', pos_cam, pos_cam.tolist())
-            print('Matrice de rotation de la caméra\n', mat_rot, mat_rot.tolist())
-
-            # phi = -np.arctan2(mat_rot[1][2],mat_rot[2][2])
-            # gamma = -np.arctan2(mat_rot[0][1],mat_rot[0][0])
-            # omega = np.arctan2(mat_rot[0][2],-mat_rot[1][2]*np.sin(phi)+mat_rot[2][2]*np.cos(phi))
-            # angles = np.array([phi, gamma, omega])
-            # print('Angle de rotation: ', angles)at_rot.T, [0,1,0])at_rot.T, [0,1,0])at_rot.T, [0,1,0])at_rot.T, [0,1,0])at_rot.T, [0,1,0])at_rot.T, [0,1,0])
-
-            # phi = np.arctan2(mat_rot[2][1],mat_rot[2][2])
-            # gamma = -np.arcsin(mat_rot[2][0])
-            # omega = np.arctan2(mat_rot[1][0],mat_rot[0][0])
-            # angles = np.array([phi, gamma, omega])
-
-            angles =  np.dot(mat_rot.T, [1,0,0])
-            print('Angle de rotation: ', angles)
-
+            # Matrices de projection des 2 cameras de calibrage pour la detection de la balle
             right_projection = get_transformation_matrix(config, right_rvecs, right_tvecs)
             left_projection = get_transformation_matrix(config, left_rvecs, left_tvecs)
 
+            # Detection de la balle sur les 2 cameras
             ball1_detected, circle1 = ball_detection(frame1)
             ball2_detected, circle2 = ball_detection(frame2)
 
             if ball1_detected and ball2_detected:
+                # Triangulation de la position de la balle
                 euclid_points = triangulation(right_projection, left_projection, circle1, circle2, right_dist, left_dist)
                 
                 # Construction du message JSON
@@ -353,16 +327,14 @@ def main_loop(cap1, cap2, config, sock, right_rvecs, right_tvecs, right_dist, le
                 })
                 sock.sendto(message.encode(), (config["UDP_IP"], config["UDP_PORT1"]))
 
-            if not data_camera_sent:
-                print('MATRICE ROTATION: ', mat_rot)
-                message = json.dumps({
-                        'M': config["m_cam"].reshape(-1).tolist(),
-                        'R': r2.T.tolist()[0],
-                        'T': t2.T.tolist()[0],
-                        'F': rm[:, 2].tolist(),
-                        'U': rm[:, 1].T.tolist(),
-                })
-                sock.sendto(message.encode(), (config["UDP_IP"], config["UDP_PORT2"]))
+            message = json.dumps({
+                    'M': config["m_cam"].reshape(-1).tolist(),
+                    'R': r2.T.tolist()[0],
+                    'T': t2.T.tolist()[0],
+                    'F': rm[:, 2].tolist(),
+                    'U': rm[:, 1].T.tolist(),
+            })
+            sock.sendto(message.encode(), (config["UDP_IP"], config["UDP_PORT2"]))
 
             cv.imshow('Camera 1', frame1)
             cv.imshow('Camera 2', frame2)

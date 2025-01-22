@@ -1,5 +1,5 @@
 import cv2 as cv
-x = 2
+x = 1
 if x == 1:
     for i in range(16):
         cap = cv.VideoCapture(i)
